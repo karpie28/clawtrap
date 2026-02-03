@@ -116,7 +116,8 @@ export function loadConfig(): Config {
   }
 
   // Override with environment variables
-  config.instance_id = process.env.CLAWTRAP_INSTANCE_ID || config.instance_id;
+  // Use hostname as default instance_id (unique per Fargate task)
+  config.instance_id = process.env.CLAWTRAP_INSTANCE_ID || process.env.HOSTNAME || require('os').hostname() || config.instance_id;
   config.instance_ip = process.env.CLAWTRAP_INSTANCE_IP || config.instance_ip;
 
   if (process.env.CLAWTRAP_HTTP_PORT) {
@@ -129,6 +130,10 @@ export function loadConfig(): Config {
 
   if (process.env.CLAWTRAP_LOG_BACKEND) {
     config.logging.backend = process.env.CLAWTRAP_LOG_BACKEND as LoggingConfig['backend'];
+  }
+
+  if (process.env.CLAWTRAP_S3_BUCKET) {
+    config.logging.s3_bucket = process.env.CLAWTRAP_S3_BUCKET;
   }
 
   if (process.env.CLAWTRAP_CANARY_CALLBACK_URL) {

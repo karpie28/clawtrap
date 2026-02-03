@@ -1,0 +1,108 @@
+name: Infrastructure
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'cloudformation/**'
+      - '.github/workflows/infrastructure.yml'
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Action to perform'
+        required: true
+        default: 'deploy'
+        type: choice
+        options:
+          - deploy
+          - delete
+      desired_count:
+        description: 'Number of honeypot instances'
+        required: false
+        default: '10'
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-2
+  STACK_NAME: clawtrap-production
+
+jobs:
+  deploy:
+    name: Deploy Infrastructure
+    runs-on: ubuntu-latest
+    if: github.event.inputs.action != 'delete'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy CloudFormation stack
+        run: |
+          DESIRED_COUNT="${{ github.event.inputs.desired_count || '10' }}"
+
+          aws cloudformation deploy \
+            --template-file cloudformation/fargate.yaml \
+            --stack-name ${{ env.STACK_NAME }} \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --parameter-overrides \
+              Environment=production \
+              GitHubOrg=karpie28 \
+              GitHubRepo=clawtrap \
+              DesiredCount="$DESIRED_COUNT" \
+            --tags \
+              Project=clawtrap \
+              Environment=production \
+            --no-fail-on-empty-changeset
+
+      - name: Get outputs
+        run: |
+          echo "## Stack Outputs" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          aws cloudformation describe-stacks \
+            --stack-name ${{ env.STACK_NAME }} \
+            --query 'Stacks[0].Outputs[*].[OutputKey,OutputValue]' \
+            --output table >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+
+          # Show role ARN prominently
+          ROLE_ARN=$(aws cloudformation describe-stacks \
+            --stack-name ${{ env.STACK_NAME }} \
+            --query 'Stacks[0].Outputs[?OutputKey==`GitHubActionsRoleArn`].OutputValue' \
+            --output text)
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### GitHub Actions Role ARN" >> $GITHUB_STEP_SUMMARY
+          echo "Add this to GitHub Secrets as \`AWS_ROLE_ARN\`:" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "\`$ROLE_ARN\`" >> $GITHUB_STEP_SUMMARY
+
+  delete:
+    name: Delete Infrastructure
+    runs-on: ubuntu-latest
+    if: github.event.inputs.action == 'delete'
+
+    steps:
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Delete CloudFormation stack
+        run: |
+          echo "Deleting stack ${{ env.STACK_NAME }}..."
+          aws cloudformation delete-stack --stack-name ${{ env.STACK_NAME }}
+          aws cloudformation wait stack-delete-complete --stack-name ${{ env.STACK_NAME }}
+          echo "Stack deleted successfully"

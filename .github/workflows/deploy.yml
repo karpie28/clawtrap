@@ -6,8 +6,6 @@ on:
       - main
     paths:
       - 'honeypot/**'
-      - 'config/**'
-      - 'Dockerfile'
       - '.github/workflows/deploy.yml'
   workflow_dispatch:
     inputs:
@@ -18,11 +16,14 @@ on:
         type: boolean
 
 permissions:
-  id-token: write  # Required for OIDC
+  id-token: write
   contents: read
 
 env:
   AWS_REGION: us-east-2
+  CLUSTER_NAME: clawtrap-production
+  SERVICE_NAME: clawtrap-production
+  ECR_REPO: clawtrap-production
 
 jobs:
   build-and-deploy:
@@ -43,123 +44,97 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Set up QEMU for ARM64
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
       - name: Get ECR repository URL
-        id: ecr-repo
+        id: ecr
         run: |
-          REPO_URL=$(aws ecr describe-repositories \
-            --repository-names clawtrap-production-honeypot \
-            --query 'repositories[0].repositoryUri' \
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          echo "url=${ACCOUNT_ID}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPO }}" >> $GITHUB_OUTPUT
+
+      - name: Build and push ARM64 image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./honeypot
+          platforms: linux/arm64
+          push: true
+          tags: |
+            ${{ steps.ecr.outputs.url }}:${{ github.sha }}
+            ${{ steps.ecr.outputs.url }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            BUILD_DATE=${{ github.event.head_commit.timestamp }}
+            GIT_SHA=${{ github.sha }}
+
+      - name: Deploy to ECS
+        run: |
+          echo "Forcing new deployment to ECS..."
+          aws ecs update-service \
+            --cluster ${{ env.CLUSTER_NAME }} \
+            --service ${{ env.SERVICE_NAME }} \
+            --force-new-deployment \
+            --query 'service.deployments[0].id' \
+            --output text
+
+      - name: Wait for deployment
+        run: |
+          echo "Waiting for ECS deployment to stabilize..."
+          aws ecs wait services-stable \
+            --cluster ${{ env.CLUSTER_NAME }} \
+            --services ${{ env.SERVICE_NAME }}
+          echo "Deployment complete!"
+
+      - name: Get public IPs
+        id: ips
+        run: |
+          echo "Fetching public IPs of running tasks..."
+          TASKS=$(aws ecs list-tasks \
+            --cluster ${{ env.CLUSTER_NAME }} \
+            --service-name ${{ env.SERVICE_NAME }} \
+            --query 'taskArns[]' \
             --output text)
-          echo "url=$REPO_URL" >> $GITHUB_OUTPUT
 
-      - name: Build Docker image
-        working-directory: honeypot
-        run: |
-          docker build \
-            --tag ${{ steps.ecr-repo.outputs.url }}:${{ github.sha }} \
-            --tag ${{ steps.ecr-repo.outputs.url }}:latest \
-            --build-arg BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ') \
-            --build-arg GIT_SHA=${{ github.sha }} \
-            .
+          if [ -z "$TASKS" ]; then
+            echo "No running tasks found"
+            exit 0
+          fi
 
-      - name: Push to ECR
-        run: |
-          docker push ${{ steps.ecr-repo.outputs.url }}:${{ github.sha }}
-          docker push ${{ steps.ecr-repo.outputs.url }}:latest
+          echo "## Public IPs" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
 
-      - name: Get EC2 instance ID
-        id: ec2
-        run: |
-          INSTANCE_ID=$(aws ec2 describe-instances \
-            --filters "Name=tag:Project,Values=clawtrap" "Name=instance-state-name,Values=running" \
-            --query 'Reservations[0].Instances[0].InstanceId' \
-            --output text)
-          echo "instance_id=$INSTANCE_ID" >> $GITHUB_OUTPUT
+          for task in $TASKS; do
+            ENI=$(aws ecs describe-tasks \
+              --cluster ${{ env.CLUSTER_NAME }} \
+              --tasks "$task" \
+              --query 'tasks[0].attachments[0].details[?name==`networkInterfaceId`].value' \
+              --output text)
 
-      - name: Deploy via SSM
-        run: |
-          # Send deployment command
-          COMMAND_ID=$(aws ssm send-command \
-            --instance-ids ${{ steps.ec2.outputs.instance_id }} \
-            --document-name "AWS-RunShellScript" \
-            --parameters 'commands=["sudo /opt/clawtrap/deploy.sh"]' \
-            --timeout-seconds 300 \
-            --query 'Command.CommandId' \
-            --output text)
-
-          echo "SSM Command ID: $COMMAND_ID"
-
-          # Wait for command to complete
-          echo "Waiting for deployment to complete..."
-          for i in {1..30}; do
-            STATUS=$(aws ssm get-command-invocation \
-              --command-id $COMMAND_ID \
-              --instance-id ${{ steps.ec2.outputs.instance_id }} \
-              --query 'Status' \
-              --output text 2>/dev/null || echo "Pending")
-
-            echo "Attempt $i: Status = $STATUS"
-
-            if [ "$STATUS" = "Success" ]; then
-              echo "Deployment successful!"
-              break
-            elif [ "$STATUS" = "Failed" ] || [ "$STATUS" = "Cancelled" ] || [ "$STATUS" = "TimedOut" ]; then
-              echo "Deployment failed with status: $STATUS"
-              aws ssm get-command-invocation \
-                --command-id $COMMAND_ID \
-                --instance-id ${{ steps.ec2.outputs.instance_id }} \
-                --query 'StandardErrorContent' \
-                --output text
-              exit 1
+            if [ -n "$ENI" ]; then
+              IP=$(aws ec2 describe-network-interfaces \
+                --network-interface-ids "$ENI" \
+                --query 'NetworkInterfaces[0].Association.PublicIp' \
+                --output text 2>/dev/null || echo "pending")
+              echo "- \`$IP\`" >> $GITHUB_STEP_SUMMARY
             fi
-
-            sleep 10
           done
-
-      - name: Health check
-        run: |
-          PUBLIC_IP=$(aws ec2 describe-instances \
-            --instance-ids ${{ steps.ec2.outputs.instance_id }} \
-            --query 'Reservations[0].Instances[0].PublicIpAddress' \
-            --output text)
-
-          echo "Honeypot public IP: $PUBLIC_IP"
-          echo "Waiting for service to be healthy..."
-
-          for i in {1..12}; do
-            HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-              --connect-timeout 5 \
-              --max-time 10 \
-              -k \
-              "https://$PUBLIC_IP:443/health" 2>/dev/null || echo "000")
-
-            echo "Attempt $i: HTTP status = $HTTP_STATUS"
-
-            if [ "$HTTP_STATUS" = "200" ]; then
-              echo "Service is healthy!"
-              exit 0
-            fi
-
-            sleep 10
-          done
-
-          echo "Warning: Health check did not return 200, but deployment may still be successful"
-          echo "Please verify manually at https://$PUBLIC_IP:443"
 
       - name: Deployment summary
         if: always()
         run: |
-          PUBLIC_IP=$(aws ec2 describe-instances \
-            --instance-ids ${{ steps.ec2.outputs.instance_id }} \
-            --query 'Reservations[0].Instances[0].PublicIpAddress' \
-            --output text)
-
-          echo "## Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Deployment Info" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
           echo "| Image Tag | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Instance ID | \`${{ steps.ec2.outputs.instance_id }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Public IP | \`$PUBLIC_IP\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| HTTP URL | https://$PUBLIC_IP:443 |" >> $GITHUB_STEP_SUMMARY
-          echo "| WebSocket URL | wss://$PUBLIC_IP:18789 |" >> $GITHUB_STEP_SUMMARY
+          echo "| Cluster | \`${{ env.CLUSTER_NAME }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Service | \`${{ env.SERVICE_NAME }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Architecture | ARM64 (Graviton) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Capacity | FARGATE_SPOT |" >> $GITHUB_STEP_SUMMARY
