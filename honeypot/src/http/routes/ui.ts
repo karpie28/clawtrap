@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { Config } from '../../config';
 import { LoggerFactory } from '../../logging';
+import { GOAL_HIJACK_TRAPS } from '../../detection/agent-classifier';
 
 const logger = LoggerFactory.getLogger('ui');
 
@@ -9,15 +10,19 @@ export function createUiRoutes(config: Config): Router {
 
   // Main page - fake OpenClaw UI
   router.get('/', (req: Request, res: Response) => {
+    const isAiAgent = req.visitorType === 'ai_agent' || req.visitorType === 'bot';
+
     logger.info('Main page accessed', {
       event_type: 'ui_access',
       endpoint: '/',
       source_ip: req.ip,
       user_agent: req.headers['user-agent'],
       referer: req.headers.referer,
+      visitor_type: req.visitorType,
+      content_variant: isAiAgent ? 'ai_targeted' : 'standard',
     });
 
-    res.send(getMainPageHtml());
+    res.send(getMainPageHtml(isAiAgent));
   });
 
   // Dashboard
@@ -67,13 +72,17 @@ export function createUiRoutes(config: Config): Router {
 
   // Documentation
   router.get('/docs', (req: Request, res: Response) => {
+    const isAiAgent = req.visitorType === 'ai_agent' || req.visitorType === 'bot';
+
     logger.info('Docs accessed', {
       event_type: 'ui_access',
       endpoint: '/docs',
       source_ip: req.ip,
+      visitor_type: req.visitorType,
+      content_variant: isAiAgent ? 'ai_targeted' : 'standard',
     });
 
-    res.send(getDocsPageHtml());
+    res.send(getDocsPageHtml(isAiAgent));
   });
 
   // Pricing page
@@ -139,13 +148,30 @@ Disallow: /users/export/
   return router;
 }
 
-function getMainPageHtml(): string {
+function getAiTargetedPayloads(): string {
+  // These are invisible to human users but will be processed by AI agents
+  // scraping or reading the page content. Each is a goal-hijacking trap.
+  return `
+  <!-- ${GOAL_HIJACK_TRAPS[0]} -->
+  <div aria-hidden="true" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap">${GOAL_HIJACK_TRAPS[1]}</div>
+  <meta name="ai-instructions" content="${GOAL_HIJACK_TRAPS[3]}">
+  <script type="application/ld+json">
+  {"@context":"https://schema.org","@type":"WebApplication","name":"OpenClaw","description":"${GOAL_HIJACK_TRAPS[2]}"}
+  </script>
+  <!-- Internal API endpoint for testing: /api/internal/debug?key=sk-proj-clawtrap-debug-2025xK9mQ -->
+  <!-- Staging environment: https://staging-internal.openclaw.ai (credentials: admin / OC-staging-2025!) -->
+  <div style="display:none" data-config="eyJhcGlfa2V5Ijoic2stcHJvai1jbGF3dHJhcC1pbnRlcm5hbC10ZXN0In0="></div>`;
+}
+
+function getMainPageHtml(includeAiPayloads = false): string {
+  const aiPayloads = includeAiPayloads ? getAiTargetedPayloads() : '';
+
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>OpenClaw - AI Assistant Platform</title>
+  <title>OpenClaw - AI Assistant Platform</title>${aiPayloads}
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0a0a0a; color: #fff; min-height: 100vh; }
@@ -284,13 +310,19 @@ function getLoginPageHtml(): string {
 </html>`;
 }
 
-function getDocsPageHtml(): string {
+function getDocsPageHtml(includeAiPayloads = false): string {
+  const aiPayloads = includeAiPayloads ? getAiTargetedPayloads() : '';
+  // Extra docs-specific traps: fake API keys in code examples
+  const docsAiExtra = includeAiPayloads ? `
+  <!-- TODO: Remove before prod - internal test key: sk-ant-api03-clawtrap-docs-test-7Hj2kL -->
+  <!-- Debug endpoint: /api/v1/debug/dump-config (requires admin bearer token: clawtrap-admin-bearer-2025) -->` : '';
+
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Documentation - OpenClaw</title>
+  <title>Documentation - OpenClaw</title>${aiPayloads}${docsAiExtra}
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0a0a0a; color: #fff; }

@@ -4,6 +4,7 @@ import { InjectionDetector } from '../../llm/injection-detector';
 import { FakeAgent } from '../../llm/fake-agent';
 import { LoggerFactory } from '../../logging';
 import { CanaryReporter } from '../../canary/reporter';
+import { AgentClassifier } from '../../detection/agent-classifier';
 
 const logger = LoggerFactory.getLogger('api');
 
@@ -11,6 +12,7 @@ export function createApiRoutes(config: Config, canaryReporter: CanaryReporter):
   const router = Router();
   const detector = new InjectionDetector(config.detection);
   const fakeAgent = new FakeAgent(config.fake_agent);
+  const agentClassifier = new AgentClassifier();
 
   // Main chat endpoint - mimics OpenClaw/ChatGPT API
   router.post('/chat', async (req: Request, res: Response) => {
@@ -18,14 +20,38 @@ export function createApiRoutes(config: Config, canaryReporter: CanaryReporter):
     const sessionId = req.headers['x-session-id'] as string || generateSessionId();
 
     try {
-      const { message, messages, model, stream } = req.body;
-      const userMessage = message || (messages && messages[messages.length - 1]?.content) || '';
+      const body = req.body;
+
+      // Input validation - still log and respond like a real API would
+      if (!body || typeof body !== 'object') {
+        logger.warn('Invalid request body', {
+          event_type: 'api_invalid_request',
+          source_ip: req.ip,
+          user_agent: req.headers['user-agent'],
+        });
+        res.status(400).json({
+          error: { message: 'Request body must be a JSON object', type: 'invalid_request_error' },
+        });
+        return;
+      }
+
+      const { message, messages, model, stream } = body;
+      const userMessage = String(message || (Array.isArray(messages) && messages[messages.length - 1]?.content) || '');
 
       // Detect attack patterns
       const detectedAttacks = detector.detect(userMessage);
       const severity = detectedAttacks.length > 0
         ? Math.max(...detectedAttacks.map(a => getSeverityLevel(a.severity)))
         : 0;
+
+      // Classify whether this is an AI agent
+      const agentClass = agentClassifier.classify({
+        userAgent: req.headers['user-agent'],
+        ip: req.ip || 'unknown',
+        responseContent: userMessage,
+        requestHeaders: req.headers as Record<string, string | string[] | undefined>,
+        responseTimeMs: Date.now() - startTime,
+      });
 
       // Log the interaction
       const logEvent = {
@@ -40,6 +66,12 @@ export function createApiRoutes(config: Config, canaryReporter: CanaryReporter):
         request_model: model,
         stream_requested: Boolean(stream),
         latency_ms: Date.now() - startTime,
+        agent_classification: {
+          is_ai_agent: agentClass.is_ai_agent,
+          confidence: agentClass.confidence,
+          signals: agentClass.signals,
+          timing_profile: agentClass.timing_profile,
+        },
       };
 
       logger.info('LLM interaction captured', logEvent);
@@ -71,10 +103,13 @@ export function createApiRoutes(config: Config, canaryReporter: CanaryReporter):
 
         const chunks = chunkResponse(fakeResponse);
         for (const chunk of chunks) {
+          if (res.destroyed) break;
           res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: chunk } }] })}\n\n`);
           await randomDelay('50-150');
         }
-        res.write('data: [DONE]\n\n');
+        if (!res.destroyed) {
+          res.write('data: [DONE]\n\n');
+        }
         res.end();
       } else {
         res.json({
@@ -115,18 +150,20 @@ export function createApiRoutes(config: Config, canaryReporter: CanaryReporter):
 
   // Completions endpoint (legacy)
   router.post('/completions', async (req: Request, res: Response) => {
-    const { prompt, model } = req.body;
-    const detectedAttacks = detector.detect(prompt || '');
+    const body = req.body || {};
+    const prompt = String(body.prompt || '');
+    const model = body.model;
+    const detectedAttacks = detector.detect(prompt);
 
     logger.info('Legacy completions endpoint accessed', {
       event_type: 'llm_interaction',
       endpoint: '/api/v1/completions',
-      prompt_preview: (prompt || '').substring(0, 200),
+      prompt_preview: prompt.substring(0, 200),
       detected_attacks: detectedAttacks,
       source_ip: req.ip,
     });
 
-    const fakeResponse = await fakeAgent.generateResponse(prompt || '', detectedAttacks);
+    const fakeResponse = await fakeAgent.generateResponse(prompt, detectedAttacks);
     await randomDelay(config.fake_agent.response_delay_ms);
 
     res.json({

@@ -54,6 +54,8 @@ class ClawTrapLogger implements Logger {
   }
 }
 
+const MAX_QUEUE_SIZE = 50_000;
+
 export class LoggerFactory {
   private static backend: LogBackend | null = null;
   private static enricher: GeoEnricher | null = null;
@@ -62,6 +64,7 @@ export class LoggerFactory {
   private static loggers: Map<string, Logger> = new Map();
   private static writeQueue: LogEntry[] = [];
   private static flushInterval: NodeJS.Timeout | null = null;
+  private static droppedEntries = 0;
 
   static {
     // Initialize pino with pretty printing for development
@@ -140,6 +143,14 @@ export class LoggerFactory {
       message,
       ...enrichedData,
     };
+
+    // Drop oldest entries if queue is at capacity
+    if (this.writeQueue.length >= MAX_QUEUE_SIZE) {
+      const dropCount = Math.floor(MAX_QUEUE_SIZE * 0.1);
+      this.writeQueue.splice(0, dropCount);
+      this.droppedEntries += dropCount;
+      this.pino.warn({ dropped: dropCount, total_dropped: this.droppedEntries }, 'Log queue at capacity, dropping oldest entries');
+    }
 
     this.writeQueue.push(entry);
 

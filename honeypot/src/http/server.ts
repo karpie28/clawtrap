@@ -13,6 +13,7 @@ import { createApiRoutes } from './routes/api';
 import { createAuthRoutes } from './routes/auth';
 import { createUiRoutes } from './routes/ui';
 import { createLoggerMiddleware } from './middleware/logger';
+import { createAgentDetectMiddleware } from './middleware/agent-detect';
 import { LoggerFactory } from '../logging';
 import { CanaryReporter } from '../canary/reporter';
 
@@ -49,6 +50,9 @@ export function createHttpServer(config: Config, canaryReporter: CanaryReporter)
   // Body parsing
   app.use(express.json({ limit: '10mb' }));
   app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+  // Agent detection middleware - classifies visitor type before logging
+  app.use(createAgentDetectMiddleware());
 
   // Logging middleware - captures all requests
   app.use(createLoggerMiddleware(config));

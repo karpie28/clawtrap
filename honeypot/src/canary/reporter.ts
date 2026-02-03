@@ -5,6 +5,7 @@ import { CanaryConfig } from '../config';
 import { LoggerFactory } from '../logging';
 
 const logger = LoggerFactory.getLogger('canary-reporter');
+const MAX_RETRY_QUEUE = 500;
 
 export interface CanaryEvent {
   type: string;
@@ -120,14 +121,42 @@ export class CanaryReporter {
 
     // Send to callback URL if configured
     if (this.config.callback_url) {
-      await this.sendToCallback(reports);
+      const sent = await this.sendToCallbackWithRetry(reports);
+      if (!sent) {
+        // Re-queue failed reports (at the front) so they retry next flush
+        this.reportQueue.unshift(...reports);
+        // Cap the queue to prevent unbounded growth from persistent failures
+        if (this.reportQueue.length > MAX_RETRY_QUEUE) {
+          const dropped = this.reportQueue.splice(MAX_RETRY_QUEUE);
+          logger.warn('Canary retry queue overflow, dropping oldest reports', { dropped: dropped.length });
+        }
+      }
     }
-
-    // Could also send to AWS Lambda, etc.
   }
 
-  private async sendToCallback(reports: CanaryReport[]): Promise<void> {
-    if (!this.config.callback_url) return;
+  private async sendToCallbackWithRetry(reports: CanaryReport[], maxRetries = 3): Promise<boolean> {
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      if (attempt > 0) {
+        const backoffMs = Math.min(1000 * Math.pow(2, attempt - 1), 8000);
+        await new Promise(r => setTimeout(r, backoffMs));
+      }
+
+      const success = await this.sendToCallback(reports);
+      if (success) return true;
+
+      logger.warn('Canary callback attempt failed, retrying', {
+        attempt: attempt + 1,
+        max_retries: maxRetries,
+        report_count: reports.length,
+      });
+    }
+
+    logger.error('Canary callback failed after all retries', { report_count: reports.length });
+    return false;
+  }
+
+  private async sendToCallback(reports: CanaryReport[]): Promise<boolean> {
+    if (!this.config.callback_url) return false;
 
     try {
       const url = new URL(this.config.callback_url);
@@ -151,21 +180,23 @@ export class CanaryReporter {
         },
       };
 
-      await new Promise<void>((resolve, reject) => {
+      return await new Promise<boolean>((resolve) => {
         const lib = isHttps ? https : http;
         const req = lib.request(options, (res) => {
+          // Consume response body to free socket
+          res.resume();
           if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
             logger.debug('Canary reports sent successfully', {
               count: reports.length,
               status: res.statusCode,
             });
-            resolve();
+            resolve(true);
           } else {
             logger.warn('Canary callback returned non-success status', {
               status: res.statusCode,
               count: reports.length,
             });
-            resolve(); // Don't reject, just log
+            resolve(false);
           }
         });
 
@@ -174,13 +205,13 @@ export class CanaryReporter {
             error: error.message,
             count: reports.length,
           });
-          resolve(); // Don't reject, just log
+          resolve(false);
         });
 
         req.setTimeout(10000, () => {
           req.destroy();
           logger.warn('Canary callback request timed out');
-          resolve();
+          resolve(false);
         });
 
         req.write(payload);
@@ -190,6 +221,7 @@ export class CanaryReporter {
       logger.error('Error sending canary reports', {
         error: (error as Error).message,
       });
+      return false;
     }
   }
 

@@ -7,6 +7,7 @@ import { LoggerFactory } from '../logging';
 import { InjectionDetector } from '../llm/injection-detector';
 import { FakeAgent } from '../llm/fake-agent';
 import { CanaryReporter } from '../canary/reporter';
+import { AgentClassifier } from '../detection/agent-classifier';
 import { SessionManager, Session } from './session';
 
 const logger = LoggerFactory.getLogger('websocket');
@@ -15,11 +16,18 @@ export interface WebSocketGateway {
   close: () => Promise<void>;
 }
 
+const MAX_CONNECTIONS_PER_IP = 20;
+const CONNECTION_WINDOW_MS = 60_000;
+
 export function createWebSocketGateway(config: Config, canaryReporter: CanaryReporter): WebSocketGateway {
   const wss = new WebSocketServer({ port: config.server.ws_port });
   const detector = new InjectionDetector(config.detection);
   const fakeAgent = new FakeAgent(config.fake_agent);
   const sessionManager = new SessionManager();
+  const agentClassifier = new AgentClassifier();
+
+  // Track connection rates per IP for rate limiting
+  const connectionCounts = new Map<string, { count: number; resetAt: number }>();
 
   logger.info(`WebSocket gateway listening on port ${config.server.ws_port}`);
 
@@ -27,9 +35,34 @@ export function createWebSocketGateway(config: Config, canaryReporter: CanaryRep
     const sessionId = uuidv4();
     const clientIp = getClientIp(req);
 
+    // Rate limit connections per IP
+    const now = Date.now();
+    const ipEntry = connectionCounts.get(clientIp);
+    if (ipEntry && now < ipEntry.resetAt) {
+      ipEntry.count++;
+      if (ipEntry.count > MAX_CONNECTIONS_PER_IP) {
+        logger.warn('WebSocket connection rate limited', {
+          event_type: 'ws_rate_limited',
+          source_ip: clientIp,
+          connections_in_window: ipEntry.count,
+        });
+        ws.close(1008, 'Rate limit exceeded');
+        return;
+      }
+    } else {
+      connectionCounts.set(clientIp, { count: 1, resetAt: now + CONNECTION_WINDOW_MS });
+    }
+
     const session = sessionManager.createSession(sessionId, clientIp, {
       userAgent: req.headers['user-agent'],
       origin: req.headers.origin,
+    });
+
+    // Classify on connection
+    const connectClassification = agentClassifier.classify({
+      userAgent: req.headers['user-agent'],
+      ip: clientIp,
+      requestHeaders: req.headers as Record<string, string | string[] | undefined>,
     });
 
     logger.info('WebSocket connection established', {
@@ -38,6 +71,11 @@ export function createWebSocketGateway(config: Config, canaryReporter: CanaryRep
       source_ip: clientIp,
       user_agent: req.headers['user-agent'],
       origin: req.headers.origin,
+      agent_classification: {
+        is_ai_agent: connectClassification.is_ai_agent,
+        confidence: connectClassification.confidence,
+        signals: connectClassification.signals,
+      },
     });
 
     // Send welcome message
@@ -60,7 +98,7 @@ export function createWebSocketGateway(config: Config, canaryReporter: CanaryRep
           source_ip: clientIp,
         });
 
-        await handleMessage(ws, session, message, detector, fakeAgent, config, canaryReporter);
+        await handleMessage(ws, session, message, detector, fakeAgent, config, canaryReporter, agentClassifier);
       } catch (error) {
         logger.error('Error processing WebSocket message', {
           event_type: 'ws_error',
@@ -110,8 +148,19 @@ export function createWebSocketGateway(config: Config, canaryReporter: CanaryRep
     ws.on('close', () => clearInterval(heartbeat));
   });
 
+  // Periodically clear stale rate limit entries
+  const rateLimitCleanup = setInterval(() => {
+    const cutoff = Date.now();
+    for (const [ip, entry] of connectionCounts.entries()) {
+      if (cutoff >= entry.resetAt) connectionCounts.delete(ip);
+    }
+  }, CONNECTION_WINDOW_MS);
+  rateLimitCleanup.unref();
+
   return {
     close: () => new Promise((resolve) => {
+      clearInterval(rateLimitCleanup);
+      sessionManager.close();
       wss.close(() => {
         logger.info('WebSocket gateway closed');
         resolve();
@@ -127,11 +176,12 @@ async function handleMessage(
   detector: InjectionDetector,
   fakeAgent: FakeAgent,
   config: Config,
-  canaryReporter: CanaryReporter
+  canaryReporter: CanaryReporter,
+  agentClassifier: AgentClassifier
 ): Promise<void> {
   switch (message.type) {
     case 'chat':
-      await handleChatMessage(ws, session, message, detector, fakeAgent, config, canaryReporter);
+      await handleChatMessage(ws, session, message, detector, fakeAgent, config, canaryReporter, agentClassifier);
       break;
 
     case 'tool_call':
@@ -162,8 +212,10 @@ async function handleChatMessage(
   detector: InjectionDetector,
   fakeAgent: FakeAgent,
   config: Config,
-  canaryReporter: CanaryReporter
+  canaryReporter: CanaryReporter,
+  agentClassifier: AgentClassifier
 ): Promise<void> {
+  const msgStartTime = Date.now();
   const content = message.content || '';
 
   // Detect attacks
@@ -201,6 +253,14 @@ async function handleChatMessage(
     }
   }
 
+  // Classify whether this is an AI agent (using message content + timing)
+  const agentClass = agentClassifier.classify({
+    ip: session.clientIp,
+    userAgent: session.metadata.userAgent,
+    responseContent: content,
+    responseTimeMs: Date.now() - msgStartTime,
+  });
+
   // Log the interaction
   logger.info('WebSocket chat message', {
     event_type: 'ws_chat',
@@ -209,6 +269,12 @@ async function handleChatMessage(
     content: content,
     content_length: content.length,
     attacks_detected: attacks.length,
+    agent_classification: {
+      is_ai_agent: agentClass.is_ai_agent,
+      confidence: agentClass.confidence,
+      signals: agentClass.signals,
+      timing_profile: agentClass.timing_profile,
+    },
   });
 
   // Send typing indicator
