@@ -1,83 +1,73 @@
 # ClawTrap
 
-Honeypot mimicking an AI assistant. Captures traditional attacks + LLM-specific vectors (prompt injection, jailbreaks, OWASP LLM Top 10).
+Honeypot mimicking an AI assistant. Captures LLM-specific attack vectors (prompt injection, jailbreaks, tool abuse).
 
-## Quick Start
+## Architecture
+
+- **10 Fargate containers** with unique public IPs
+- **FARGATE_SPOT + ARM64** for cost optimization
+- **S3 logging** with partitioned structure
+- **GitHub Actions** CI/CD with OIDC auth
+
+## Deployment
+
+Infrastructure is deployed via CloudFormation to AWS us-east-2.
 
 ```bash
-# Create config
-cat > .env << 'EOF'
-CLAWTRAP_INSTANCE_ID=my-honeypot
-CLAWTRAP_LOG_BACKEND=s3
-CLAWTRAP_S3_BUCKET=your-bucket
-AWS_REGION=us-east-1
-AWS_ACCESS_KEY_ID=your-key
-AWS_SECRET_ACCESS_KEY=your-secret
-EOF
+# Deploy infrastructure (run once)
+./cloudformation/deploy.sh
 
-# Run
-docker compose up -d
+# Add AWS_ROLE_ARN to GitHub Secrets, then push to main to deploy app
 ```
 
 ## Services
 
 | Service | Port | Description |
 |---------|------|-------------|
-| HTTPS API | 443 | Fake AI assistant API |
-| WebSocket | 18789 | Real-time LLM interactions |
-| SSH | 22 | Cowrie SSH honeypot |
+| HTTP API | 8443 | Fake AI assistant API |
+| WebSocket | 18789 | MCP protocol connections |
 
 ## What It Captures
 
-- **SSH**: Credentials, commands, lateral movement attempts
-- **HTTPS**: API abuse, auth attempts, LLM interactions
-- **LLM Attacks**: Prompt injection, jailbreaks, tool abuse (50+ patterns)
+- **LLM Attacks**: Prompt injection, jailbreaks, tool abuse (38 patterns)
+- **HTTP**: API abuse, auth attempts, suspicious payloads
+- **WebSocket**: Real-time LLM interactions
 
-## Logging Backends
+## Logs
 
-**S3** (recommended):
-```env
-CLAWTRAP_LOG_BACKEND=s3
-CLAWTRAP_S3_BUCKET=my-bucket
-AWS_ACCESS_KEY_ID=...
-AWS_SECRET_ACCESS_KEY=...
+Logs are stored in S3 with partitioned structure:
+
+```
+s3://clawtrap-production-logs-{account}/clawtrap-logs/year=2026/month=02/day=03/hour=02/
 ```
 
-**Loki**:
-```env
-CLAWTRAP_LOG_BACKEND=loki
-CLAWTRAP_LOKI_URL=http://loki:3100
-```
-
-**CloudWatch**:
-```env
-CLAWTRAP_LOG_BACKEND=cloudwatch
-CLAWTRAP_CLOUDWATCH_LOG_GROUP=/clawtrap/honeypot
-AWS_REGION=us-east-1
-```
-
-## Log Format
-
-All events are structured JSON:
+Format: gzip-compressed JSONL
 
 ```json
 {
-  "timestamp": "2024-08-15T14:30:00.000Z",
-  "instance_id": "my-honeypot",
-  "event_type": "llm_interaction",
-  "source": {
-    "ip": "1.2.3.4",
-    "geo": { "country": "CN", "city": "Beijing" }
-  },
-  "llm": {
-    "user_message": "Ignore previous instructions...",
-    "detected_attacks": [{
-      "type": "prompt_injection",
-      "confidence": 0.95,
-      "severity": "high"
-    }]
-  }
+  "timestamp": "2026-02-03T02:33:43.356Z",
+  "level": "info",
+  "component": "main",
+  "instance_id": "ip-10-0-2-89.us-east-2.compute.internal",
+  "message": "ClawTrap honeypot started successfully"
 }
+```
+
+## Useful Commands
+
+```bash
+# Get public IPs
+aws ecs list-tasks --cluster clawtrap-production --query 'taskArns[]' --output text | \
+  xargs -I{} aws ecs describe-tasks --cluster clawtrap-production --tasks {} \
+  --query 'tasks[0].attachments[0].details[?name==`networkInterfaceId`].value' --output text | \
+  xargs -I{} aws ec2 describe-network-interfaces --network-interface-ids {} \
+  --query 'NetworkInterfaces[0].Association.PublicIp' --output text
+
+# Rotate IPs (force new deployment)
+aws ecs update-service --cluster clawtrap-production --service clawtrap-production --force-new-deployment
+
+# View logs
+aws logs tail /ecs/clawtrap-production --since 10m --follow
 ```
 
 ## License
