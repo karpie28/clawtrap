@@ -19,7 +19,7 @@ Parameters:
 
   DesiredCount:
     Type: Number
-    Default: 10
+    Default: 2
     Description: Number of Fargate tasks (each gets a public IP)
 
   HttpPort:
@@ -201,7 +201,7 @@ Resources:
           Weight: 1
       ClusterSettings:
         - Name: containerInsights
-          Value: enabled
+          Value: disabled
 
   # Task Execution Role
   TaskExecutionRole:
@@ -322,7 +322,7 @@ Resources:
     Type: AWS::Logs::LogGroup
     Properties:
       LogGroupName: !Sub /ecs/clawtrap-${Environment}
-      RetentionInDays: 7
+      RetentionInDays: 1
 
   # Task Definition - ARM64, minimum resources for cost savings
   TaskDefinition:
