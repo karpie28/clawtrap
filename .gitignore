@@ -1,0 +1,92 @@
+# Dependencies
+node_modules/
+.pnp/
+.pnp.js
+
+# Build output
+dist/
+build/
+*.js.map
+
+# Test coverage
+coverage/
+.nyc_output/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+.terraform.lock.hcl
+
+# Ansible
+*.retry
+ansible/inventory.ini
+!ansible/inventory.ini.example
+
+# Docker
+docker-compose.override.yml
+
+# Secrets (be paranoid)
+*.pem
+*.key
+*.crt
+id_rsa*
+*.gpg
+credentials
+.aws/
+.ssh/
+
+# GeoIP databases
+*.mmdb
+data/geoip/
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.bak
+
+# Package manager locks (keep one, ignore others)
+# package-lock.json  # Uncomment if using yarn
+# yarn.lock  # Uncomment if using npm
+
+# Python (for Lambda)
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+*.egg-info/
+.eggs/
+*.egg
+
+# Archives
+*.zip
+*.tar.gz
+*.tgz

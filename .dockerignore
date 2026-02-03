@@ -1,0 +1,64 @@
+# Git
+.git
+.gitignore
+
+# Dependencies (will be installed in container)
+node_modules
+honeypot/node_modules
+
+# Terraform
+terraform/
+*.tfvars
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+
+# Tests
+tests/
+honeypot/tests/
+*.test.ts
+jest.config.js
+coverage/
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Logs
+logs/
+*.log
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Documentation
+*.md
+docs/
+
+# CI/CD
+.github/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+dist/
+build/
+
+# Development scripts
+scripts/local-dev.sh
+
+# Ansible
+ansible/
+
+# Secrets
+*.pem
+*.key
+*.crt
+credentials

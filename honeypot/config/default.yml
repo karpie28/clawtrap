@@ -1,0 +1,39 @@
+server:
+  http_port: 443
+  ws_port: 18789
+  tls:
+    enabled: false
+    cert: /etc/clawtrap/cert.pem
+    key: /etc/clawtrap/key.pem
+
+logging:
+  backend: file  # file, cloudwatch, loki, elasticsearch, s3
+  level: info
+  file_path: ./logs
+  enrichment:
+    geo: true
+    asn: true
+
+detection:
+  patterns_dir: ./config/patterns
+  alert_on:
+    - critical
+    - high
+
+canary:
+  enabled: true
+  callback_url: ${CLAWTRAP_CANARY_CALLBACK_URL}
+  tokens:
+    - type: openai_key
+      file: ~/.openclaw/openclaw.json
+      key_path: openai_api_key
+    - type: anthropic_key
+      file: ~/.openclaw/openclaw.json
+      key_path: anthropic_api_key
+    - type: aws_credentials
+      file: ~/.aws/credentials
+
+fake_agent:
+  response_delay_ms: "500-2000"  # Random delay for realism
+  model_name: "gpt-4"            # What we claim to be
+  personality: helpful           # helpful, cautious, technical
