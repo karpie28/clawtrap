@@ -91,40 +91,6 @@ jobs:
             --services ${{ env.SERVICE_NAME }}
           echo "Deployment complete!"
 
-      - name: Get public IPs
-        id: ips
-        run: |
-          echo "Fetching public IPs of running tasks..."
-          TASKS=$(aws ecs list-tasks \
-            --cluster ${{ env.CLUSTER_NAME }} \
-            --service-name ${{ env.SERVICE_NAME }} \
-            --query 'taskArns[]' \
-            --output text)
-
-          if [ -z "$TASKS" ]; then
-            echo "No running tasks found"
-            exit 0
-          fi
-
-          echo "## Public IPs" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-
-          for task in $TASKS; do
-            ENI=$(aws ecs describe-tasks \
-              --cluster ${{ env.CLUSTER_NAME }} \
-              --tasks "$task" \
-              --query 'tasks[0].attachments[0].details[?name==`networkInterfaceId`].value' \
-              --output text)
-
-            if [ -n "$ENI" ]; then
-              IP=$(aws ec2 describe-network-interfaces \
-                --network-interface-ids "$ENI" \
-                --query 'NetworkInterfaces[0].Association.PublicIp' \
-                --output text 2>/dev/null || echo "pending")
-              echo "- \`$IP\`" >> $GITHUB_STEP_SUMMARY
-            fi
-          done
-
       - name: Deployment summary
         if: always()
         run: |
