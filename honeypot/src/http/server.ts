@@ -12,6 +12,7 @@ import { Config } from '../config';
 import { createApiRoutes } from './routes/api';
 import { createAuthRoutes } from './routes/auth';
 import { createUiRoutes } from './routes/ui';
+import { createDiscoveryRoutes } from './routes/discovery';
 import { createLoggerMiddleware } from './middleware/logger';
 import { createAgentDetectMiddleware } from './middleware/agent-detect';
 import { LoggerFactory } from '../logging';
@@ -59,6 +60,10 @@ export function createHttpServer(config: Config, canaryReporter: CanaryReporter)
 
   // Static files (fake OpenClaw UI)
   app.use(express.static(path.join(__dirname, 'static')));
+
+  // Discovery routes - serve fake sensitive files and AI manifests
+  // These MUST come before UI routes to catch specific paths
+  app.use('/', createDiscoveryRoutes(config));
 
   // API routes
   app.use('/api/v1', createApiRoutes(config, canaryReporter));
