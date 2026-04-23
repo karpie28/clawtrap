@@ -28,7 +28,7 @@
     "nanoid": "^5.0.4",
     "pino": "^8.18.0",
     "pino-pretty": "^10.3.1",
-    "uuid": "^9.0.1",
+    "uuid": "^14.0.0",
     "ws": "^8.16.0"
   },
   "devDependencies": {
